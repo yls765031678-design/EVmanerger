@@ -1,0 +1,81 @@
+name: 到期自动失效
+
+# 报告为临时分享，30 天后自动把页面替换为过期提示页，并重写 git 历史以移除数据文件。
+# 到期时间：2026-11-25 23:59:59（北京时间）
+# 如需延期：改下方 EXPIRY 常量，重新推送即可（但需先恢复数据文件）。
+
+on:
+  schedule:
+    # 每 6 小时检查一次。GitHub 定时任务实际触发可能有数十分钟延迟，
+    # 拉高频率可把延迟控制在较小范围。
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # 支持手动触发，便于验证
+
+permissions:
+  contents: write
+
+jobs:
+  expire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 判断是否到期
+        id: chk
+        run: |
+          EXPIRY="2026-11-25 23:59:59"
+          NOW=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')
+          echo "当前时间（北京）: $NOW"
+          echo "到期时间（北京）: $EXPIRY"
+
+          # 已是过期页则直接跳过，保证幂等
+          if grep -q 'data-expired="1"' index.html 2>/dev/null; then
+            echo "检测到已处于过期状态，跳过。"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=0" >> "$GITHUB_OUTPUT"
+
+          # ISO 8601 格式的字符串比较等价于时间比较
+          if [[ "$NOW" > "$EXPIRY" ]]; then
+            echo "结论：已到期，执行失效。"
+            echo "expired=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "结论：未到期，不做改动。"
+            echo "expired=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 替换为过期页并重写历史
+        if: steps.chk.outputs.expired == '1' && steps.chk.outputs.skip == '0'
+        run: |
+          set -euo pipefail
+
+          git config user.name  "expiry-bot"
+          git config user.email "expiry-bot@users.noreply.github.com"
+
+          # 页面替换为过期提示页
+          cp expire.html index.html
+          cp expire.html full.html
+
+          # 用孤立分支重建，使旧提交（含完整数据）不再存在于仓库历史中
+          git checkout --orphan rebuild
+          git add -A
+          git commit -m "报告已于 2026-11-25 到期，数据文件已移除"
+
+          git branch -D main || true
+          git branch -m main
+          git push --force origin main
+
+          echo "完成：仓库历史已重写，数据文件不再可访问。"
+
+      - name: 记录结果
+        run: |
+          echo "### 到期检查结果" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 当前时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 到期时间：2026-11-25 23:59:59" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 已到期：${{ steps.chk.outputs.expired }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 跳过（已处理）：${{ steps.chk.outputs.skip }}" >> "$GITHUB_STEP_SUMMARY"
